@@ -1,0 +1,2 @@
+C:\code\repos\dictator\artifacts\publish\win-x64\Dictator.pdb
+C:\code\repos\dictator\artifacts\publish\win-x64\Dictator.exe
