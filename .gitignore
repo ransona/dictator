@@ -485,3 +485,6 @@ $RECYCLE.BIN/
 
 !Dictator.App/
 !Dictator.App/**
+Dictator.App/[Bb]in/
+Dictator.App/[Oo]bj/
+Dictator.App/*.csproj.user
