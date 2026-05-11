@@ -8,7 +8,8 @@
 - Pops a small always-on-top recording window.
 - Records microphone audio locally.
 - Sends the captured `.wav` audio to `POST /v1/audio/transcriptions`.
-- Uses the returned text to paste back into the text field that was focused before recording started.
+- Optionally runs one chat-based post-processing pass over the full transcript when the dictated text includes an instruction like making an email, summarizing, formatting, or rewriting.
+- Uses the final returned text to paste back into the text field that was focused before recording started.
 - Stores the OpenAI API key in `HKCU\Software\Dictator`.
 - Can auto-start at sign-in through the current-user `Run` registry key.
 

@@ -10,6 +10,8 @@ internal sealed class DictatorApplicationContext : ApplicationContext
     private readonly RegistrySettingsStore settingsStore = new();
     private readonly StartupManager startupManager = new();
     private readonly OpenAiTranscriptionService transcriptionService = new();
+    private readonly OpenAiTranscriptPostProcessor transcriptPostProcessor = new();
+    private readonly HistoryStore historyStore = new();
     private readonly AudioRecorder audioRecorder = new();
     private readonly HotkeyWindow hotkeyWindow = new();
     private readonly NotifyIcon notifyIcon;
@@ -29,6 +31,7 @@ internal sealed class DictatorApplicationContext : ApplicationContext
         overlay.CancelRequested += async (_, _) => await CancelRecordingAsync();
         overlay.TogglePauseRequested += (_, _) => TogglePause();
         overlay.OptionsRequested += (_, _) => ShowOptions();
+        overlay.HistoryRequested += (_, _) => ShowHistory();
 
         overlayTimer = new System.Windows.Forms.Timer { Interval = 200 };
         overlayTimer.Tick += (_, _) => overlay.UpdateState(audioRecorder.State, audioRecorder.RecordedDuration);
@@ -63,6 +66,7 @@ internal sealed class DictatorApplicationContext : ApplicationContext
     {
         var menu = new ContextMenuStrip();
         menu.Items.Add("Start Dictation", null, (_, _) => BeginRecording());
+        menu.Items.Add("History", null, (_, _) => ShowHistory());
         menu.Items.Add("Options", null, (_, _) => ShowOptions());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Exit", null, (_, _) => ExitThread());
@@ -75,6 +79,9 @@ internal sealed class DictatorApplicationContext : ApplicationContext
         {
             return;
         }
+
+        // Reload settings on each activation so a running tray instance picks up saved changes.
+        settings = settingsStore.Load();
 
         if (string.IsNullOrWhiteSpace(settings.ApiKey))
         {
@@ -140,13 +147,30 @@ internal sealed class DictatorApplicationContext : ApplicationContext
             var transcript = await transcriptionService.TranscribeAsync(
                 audio,
                 settings.ApiKey,
-                settings.Model,
+                settings.TranscriptionModel,
+                CancellationToken.None);
+
+            if (string.IsNullOrWhiteSpace(transcript))
+            {
+                overlay.Hide();
+                ShowBalloon("No transcript returned", "OpenAI returned empty text for that recording.");
+                return;
+            }
+
+            overlay.SetBusy("Processing text...");
+            transcript = await transcriptPostProcessor.ProcessTranscriptAsync(
+                transcript,
+                settings.ApiKey,
+                settings.EmailRewriteModel,
                 CancellationToken.None);
             overlay.Hide();
 
-            if (!string.IsNullOrWhiteSpace(transcript))
+            historyStore.Add(transcript);
+            var pasted = await captureTarget.RestoreAndPasteAsync(transcript);
+            overlay.Hide();
+            if (!pasted)
             {
-                await captureTarget.RestoreAndPasteAsync(transcript);
+                ShowBalloon("Transcript copied", "Paste manually with Ctrl+V.");
             }
         }
         catch (Exception ex)
@@ -176,6 +200,36 @@ internal sealed class DictatorApplicationContext : ApplicationContext
             settingsStore.Save(settings);
             startupManager.SetEnabled(form.StartOnLogin);
         }
+
+        if (shouldResume && audioRecorder.State == RecordingState.Paused && !isSending)
+        {
+            audioRecorder.Resume();
+            overlay.UpdateState(audioRecorder.State, audioRecorder.RecordedDuration);
+        }
+    }
+
+    private void ShowHistory()
+    {
+        var historyTarget = CaptureTarget.CaptureActive();
+        var shouldResume = audioRecorder.State == RecordingState.Recording;
+        if (shouldResume)
+        {
+            audioRecorder.Pause();
+            overlay.UpdateState(audioRecorder.State, audioRecorder.RecordedDuration);
+        }
+
+        using var form = new HistoryForm(historyStore.Load());
+        form.UseRequested += async item =>
+        {
+            var pasted = await historyTarget.RestoreAndPasteAsync(item.Text);
+            if (!pasted)
+            {
+                ShowBalloon("History copied", "Paste the selected message manually with Ctrl+V.");
+            }
+        };
+        form.DeleteRequested += item => historyStore.Delete(item.Id);
+        form.ClearAllRequested += (_, _) => historyStore.Clear();
+        form.ShowDialog();
 
         if (shouldResume && audioRecorder.State == RecordingState.Paused && !isSending)
         {

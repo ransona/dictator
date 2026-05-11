@@ -31,11 +31,11 @@ internal readonly record struct CaptureTarget(IntPtr WindowHandle, IntPtr FocusH
             info.hwndFocus != IntPtr.Zero ? info.hwndFocus : foreground);
     }
 
-    public async Task RestoreAndPasteAsync(string text)
+    public async Task<bool> RestoreAndPasteAsync(string text)
     {
         if (WindowHandle == IntPtr.Zero)
         {
-            return;
+            return false;
         }
 
         Clipboard.SetText(text);
@@ -48,10 +48,20 @@ internal readonly record struct CaptureTarget(IntPtr WindowHandle, IntPtr FocusH
         User32.SetForegroundWindow(WindowHandle);
         User32.BringWindowToTop(WindowHandle);
 
-        await Task.Delay(120);
+        await Task.Delay(180);
         RestoreFocus();
-        await Task.Delay(80);
-        SendPasteShortcut();
+        await Task.Delay(140);
+
+        try
+        {
+            SendKeys.SendWait("^v");
+            return true;
+        }
+        catch
+        {
+            SendPasteShortcut();
+            return true;
+        }
     }
 
     private void RestoreFocus()

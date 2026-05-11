@@ -1,0 +1,151 @@
+using System.Net.Http.Headers;
+using System.Text.RegularExpressions;
+using System.Text;
+using System.Text.Json;
+
+namespace Dictator.App.Services;
+
+internal sealed class OpenAiTranscriptPostProcessor
+{
+    private static readonly Regex PlaceholderPattern = new(
+        @"\[(?:[^\]\r\n]{1,40})\]",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex MultiBlankLinesPattern = new(
+        @"(\r?\n\s*){3,}",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private readonly HttpClient httpClient = new()
+    {
+        Timeout = TimeSpan.FromMinutes(2)
+    };
+
+    public async Task<string> ProcessTranscriptAsync(
+        string transcript,
+        string apiKey,
+        string model,
+        CancellationToken cancellationToken)
+    {
+        var finalText = await RequestProcessedTextAsync(
+            transcript,
+            apiKey,
+            model,
+            BuildPrimaryInstruction(),
+            cancellationToken);
+
+        finalText = StripPlaceholderArtifacts(finalText);
+        return string.IsNullOrWhiteSpace(finalText) ? transcript : finalText.Trim();
+    }
+
+    private async Task<string> RequestProcessedTextAsync(
+        string transcript,
+        string apiKey,
+        string model,
+        string developerInstruction,
+        CancellationToken cancellationToken)
+    {
+        using var httpRequest = new HttpRequestMessage(HttpMethod.Post, "https://api.openai.com/v1/chat/completions");
+        httpRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+
+        var payload = new
+        {
+            model,
+            response_format = new
+            {
+                type = "json_object"
+            },
+            messages = new object[]
+            {
+                new
+                {
+                    role = "developer",
+                    content = developerInstruction
+                },
+                new
+                {
+                    role = "user",
+                    content = $"Dictated text: {transcript}"
+                }
+            }
+        };
+
+        httpRequest.Content = new StringContent(
+            JsonSerializer.Serialize(payload),
+            Encoding.UTF8,
+            "application/json");
+
+        using var response = await httpClient.SendAsync(httpRequest, cancellationToken);
+        var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            throw new InvalidOperationException($"OpenAI returned {(int)response.StatusCode}: {responseBody}");
+        }
+
+        using var document = JsonDocument.Parse(responseBody);
+        var content = document.RootElement
+            .GetProperty("choices")[0]
+            .GetProperty("message")
+            .GetProperty("content")
+            .GetString();
+
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return transcript;
+        }
+
+        using var payloadDocument = JsonDocument.Parse(content);
+        var root = payloadDocument.RootElement;
+        var finalText = root.TryGetProperty("final_text", out var finalTextElement)
+            ? finalTextElement.GetString() ?? string.Empty
+            : string.Empty;
+
+        return string.IsNullOrWhiteSpace(finalText) ? transcript : finalText.Trim();
+    }
+
+    private static string StripPlaceholderArtifacts(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return text;
+        }
+
+        var cleaned = PlaceholderPattern.Replace(text, string.Empty);
+        cleaned = Regex.Replace(cleaned, @"^[ \t]*(best regards|kind regards|sincerely|thanks|thank you)[ \t]*,\s*(\r?\n)?[ \t]*(your name|name|signature)[ \t]*$",
+            string.Empty,
+            RegexOptions.IgnoreCase | RegexOptions.Multiline | RegexOptions.CultureInvariant);
+        cleaned = Regex.Replace(cleaned, @"\b(your name|your signature|insert name|add details here)\b",
+            string.Empty,
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        cleaned = MultiBlankLinesPattern.Replace(cleaned, Environment.NewLine + Environment.NewLine);
+        return cleaned.Trim();
+    }
+
+    private static string BuildPrimaryInstruction()
+    {
+        return """
+You are a dictation post-processor.
+Your job is to inspect the full dictated text and decide whether it contains a user instruction to transform the content before pasting it.
+
+Supported intents include, but are not limited to:
+- turn the content into an email
+- summarize it
+- format it
+- rewrite it in a requested style, tone, or language
+
+Rules:
+- If the dictated text contains no clear transformation instruction, keep it verbatim.
+- If it does contain a clear transformation instruction, return only the transformed result.
+- Do not mention AI, LLMs, prompts, or that a transformation happened.
+- Remove the instruction itself from the final output.
+- The final text must contain no clues that it was generated by an LLM.
+- Do not leave placeholders, template markers, bracketed fields, or prompts for the user to fill in later.
+- Do not include things like [Name], [Your Name], [Company], [Date], [Signature], or notes telling the user to add details.
+- Return fully usable text only.
+
+Return JSON only with:
+- transformed: boolean
+- final_text: string
+""";
+    }
+
+}
