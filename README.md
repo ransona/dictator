@@ -31,7 +31,7 @@ On macOS, the API key is requested once on first launch and stored in Keychain.
 
 ### macOS
 
-- `Esc+F1`: start dictation
+- `Command+D`: start dictation
 - `Enter`: stop recording, transcribe, and paste
 - `Escape`: cancel recording
 
@@ -94,7 +94,7 @@ To also launch at sign-in:
 ./scripts/Install-Mac.sh --start-on-login
 ```
 
-The installer copies the app to `/Applications/Dictator.app`. On first launch, Dictator prompts once for the OpenAI API key and stores it in Keychain. macOS will also ask for microphone permission. If the `Esc+F1` shortcut or automatic paste is blocked, grant Accessibility permission to Dictator in System Settings.
+The installer copies the app to `/Applications/Dictator.app`. On first launch, Dictator prompts once for the OpenAI API key and stores it in Keychain. macOS will also ask for microphone permission. If the `Command+D` shortcut or automatic paste is blocked, grant Accessibility permission to Dictator in System Settings.
 
 ## macOS package installer
 
@@ -113,6 +113,6 @@ artifacts/pkg/Dictator-macOS.pkg
 - Paste-back relies on restoring the previously focused window and sending `Ctrl+V`, so some elevated or protected windows may block it.
 - `Win+Esc` can fail to register if another app already owns the hotkey.
 - The prototype uses the clipboard to paste the transcript, which temporarily replaces the current clipboard contents.
-- On macOS, `Esc+F1` is detected with a keyboard event monitor because Escape is not a standard hotkey modifier. It may require Accessibility permission.
+- On macOS, `Command+D` is detected with a keyboard event monitor and may require Accessibility permission.
 - On macOS, paste-back sends `Command+V` and may require Accessibility permission.
 - The macOS package is ad-hoc signed for local installation, not notarized for public distribution.

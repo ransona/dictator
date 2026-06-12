@@ -310,8 +310,6 @@ Return JSON only with:
 private final class GlobalShortcut {
     private var globalMonitor: Any?
     private var localMonitor: Any?
-    private var escapeIsDown = false
-    private var lastEscapeDown = Date.distantPast
     private let callback: () -> Void
 
     init(callback: @escaping () -> Void) {
@@ -332,19 +330,13 @@ private final class GlobalShortcut {
     }
 
     private func handle(_ event: NSEvent) {
-        switch Int(event.keyCode) {
-        case kVK_Escape:
-            escapeIsDown = event.type == .keyDown
-            if escapeIsDown {
-                lastEscapeDown = Date()
-            }
-        case kVK_F1 where event.type == .keyDown:
-            if escapeIsDown || Date().timeIntervalSince(lastEscapeDown) < 0.45 {
-                callback()
-            }
-        default:
-            break
+        guard event.type == .keyDown,
+              Int(event.keyCode) == kVK_ANSI_D,
+              event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) else {
+            return
         }
+
+        callback()
     }
 }
 

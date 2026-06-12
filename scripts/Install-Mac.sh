@@ -26,5 +26,5 @@ if [[ "$START_ON_LOGIN" == "--start-on-login" ]]; then
 fi
 
 echo "Installed $INSTALL_DIR"
-echo "Shortcut: Esc+F1"
+echo "Shortcut: Command+D"
 echo "On first launch, macOS will ask for microphone permission. The shortcut and paste automation may require Accessibility permission in System Settings."
