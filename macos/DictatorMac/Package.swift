@@ -14,9 +14,9 @@ let package = Package(
             name: "Dictator",
             linkerSettings: [
                 .linkedFramework("AppKit"),
+                .linkedFramework("ApplicationServices"),
                 .linkedFramework("AVFoundation"),
-                .linkedFramework("Carbon"),
-                .linkedFramework("Security")
+                .linkedFramework("Carbon")
             ]
         )
     ]

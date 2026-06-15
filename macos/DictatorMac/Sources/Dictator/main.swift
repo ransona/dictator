@@ -1,8 +1,8 @@
+import ApplicationServices
 import AppKit
 import AVFoundation
 import Carbon
 import Foundation
-import Security
 
 private enum RecordingState {
     case idle
@@ -16,44 +16,27 @@ private struct HistoryMessage: Codable {
     let createdAt: Date
 }
 
-private final class KeychainStore {
-    private let service = "com.ransona.dictator.mac"
-    private let account = "openai-api-key"
+private final class SettingsStore {
+    private let directoryURL: URL
+    private let apiKeyURL: URL
+
+    init() {
+        directoryURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Dictator", isDirectory: true)
+        apiKeyURL = directoryURL.appendingPathComponent("openai-api-key.txt")
+    }
 
     func loadApiKey() -> String {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne
-        ]
-
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
-              let data = item as? Data,
-              let value = String(data: data, encoding: .utf8) else {
+        guard let value = try? String(contentsOf: apiKeyURL, encoding: .utf8) else {
             return ""
         }
 
-        return value
+        return value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    func saveApiKey(_ apiKey: String) {
-        let deleteQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account
-        ]
-        SecItemDelete(deleteQuery as CFDictionary)
-
-        let addQuery: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: account,
-            kSecValueData as String: Data(apiKey.utf8)
-        ]
-        SecItemAdd(addQuery as CFDictionary, nil)
+    func saveApiKey(_ apiKey: String) throws {
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        try apiKey.write(to: apiKeyURL, atomically: true, encoding: .utf8)
     }
 }
 
@@ -184,6 +167,24 @@ private final class AudioRecorder: NSObject, AVAudioRecorderDelegate {
     }
 }
 
+private enum OpenAIError: LocalizedError {
+    case requestFailed(statusCode: Int, body: String)
+
+    var errorDescription: String? {
+        switch self {
+        case let .requestFailed(statusCode, body):
+            return "OpenAI returned \(statusCode): \(body)"
+        }
+    }
+
+    var isAuthenticationFailure: Bool {
+        switch self {
+        case let .requestFailed(statusCode, _):
+            return statusCode == 401
+        }
+    }
+}
+
 private final class OpenAIClient: @unchecked Sendable {
     private let transcriptionModel = "whisper-1"
     private let rewriteModel = "gpt-4o-mini"
@@ -245,7 +246,7 @@ private final class OpenAIClient: @unchecked Sendable {
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let status = (response as? HTTPURLResponse)?.statusCode ?? 0
             let body = String(decoding: data, as: UTF8.self)
-            throw NSError(domain: "OpenAI", code: status, userInfo: [NSLocalizedDescriptionKey: "OpenAI returned \(status): \(body)"])
+            throw OpenAIError.requestFailed(statusCode: status, body: body)
         }
     }
 
@@ -307,9 +308,127 @@ Return JSON only with:
 }
 
 @MainActor
+private final class AccessibilityTarget {
+    private let element: AXUIElement
+
+    private init(element: AXUIElement) {
+        self.element = element
+    }
+
+    static func promptForPermissionIfNeeded() {
+        let options = [
+            "AXTrustedCheckOptionPrompt": true
+        ] as CFDictionary
+        _ = AXIsProcessTrustedWithOptions(options)
+    }
+
+    static func captureFocusedElement() -> AccessibilityTarget? {
+        let systemWide = AXUIElementCreateSystemWide()
+        var value: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(
+            systemWide,
+            kAXFocusedUIElementAttribute as CFString,
+            &value
+        )
+
+        guard result == .success, let element = value else {
+            return nil
+        }
+
+        return AccessibilityTarget(element: element as! AXUIElement)
+    }
+
+    func insertText(_ text: String) -> Bool {
+        focus()
+
+        if insertIntoValue(text) {
+            return true
+        }
+
+        if AXUIElementSetAttributeValue(
+            element,
+            kAXSelectedTextAttribute as CFString,
+            text as CFTypeRef
+        ) == .success {
+            return true
+        }
+
+        return false
+    }
+
+    private func insertIntoValue(_ text: String) -> Bool {
+        var valueRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXValueAttribute as CFString,
+            &valueRef
+        ) == .success,
+              let currentValue = valueRef as? String else {
+            return false
+        }
+
+        var rangeRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+            element,
+            kAXSelectedTextRangeAttribute as CFString,
+            &rangeRef
+        ) == .success,
+              let rangeRef else {
+            return false
+        }
+
+        let axRange = rangeRef as! AXValue
+        var selectedRange = CFRange()
+        guard AXValueGetValue(axRange, .cfRange, &selectedRange),
+              selectedRange.location >= 0,
+              selectedRange.length >= 0 else {
+            return false
+        }
+
+        let nsValue = currentValue as NSString
+        guard selectedRange.location <= nsValue.length,
+              selectedRange.location + selectedRange.length <= nsValue.length else {
+            return false
+        }
+
+        let updatedValue = nsValue.replacingCharacters(in: NSRange(location: selectedRange.location, length: selectedRange.length), with: text)
+        guard AXUIElementSetAttributeValue(
+            element,
+            kAXValueAttribute as CFString,
+            updatedValue as CFTypeRef
+        ) == .success else {
+            return false
+        }
+
+        var insertionRange = CFRange(location: selectedRange.location + (text as NSString).length, length: 0)
+        if let insertionValue = AXValueCreate(.cfRange, &insertionRange) {
+            _ = AXUIElementSetAttributeValue(
+                element,
+                kAXSelectedTextRangeAttribute as CFString,
+                insertionValue
+            )
+        }
+
+        return true
+    }
+
+    func focus() {
+        _ = AXUIElementSetAttributeValue(
+            element,
+            kAXFocusedAttribute as CFString,
+            kCFBooleanTrue
+        )
+    }
+}
+
+@MainActor
 private final class GlobalShortcut {
+    private static let doubleTapInterval: TimeInterval = 0.45
+
     private var globalMonitor: Any?
     private var localMonitor: Any?
+    private var controlWasDown = false
+    private var lastControlTap = Date.distantPast
     private let callback: () -> Void
 
     init(callback: @escaping () -> Void) {
@@ -317,44 +436,55 @@ private final class GlobalShortcut {
     }
 
     func register() {
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
             Task { @MainActor in
                 self?.handle(event)
             }
         }
 
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged]) { [weak self] event in
             self?.handle(event)
             return event
         }
     }
 
     private func handle(_ event: NSEvent) {
-        guard event.type == .keyDown,
-              Int(event.keyCode) == kVK_ANSI_D,
-              event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command) else {
+        guard event.type == .flagsChanged else {
             return
         }
 
-        callback()
+        let controlIsDown = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .contains(.control)
+
+        if controlIsDown && !controlWasDown {
+            let now = Date()
+            if now.timeIntervalSince(lastControlTap) <= Self.doubleTapInterval {
+                lastControlTap = .distantPast
+                callback()
+            } else {
+                lastControlTap = now
+            }
+        }
+
+        controlWasDown = controlIsDown
     }
 }
 
 @MainActor
 private final class OverlayWindowController {
     private let window: NSWindow
+    private let spinner = NSProgressIndicator()
     private let label = NSTextField(labelWithString: "")
-    private let actionButton = NSButton(title: "Send", target: nil, action: nil)
-    private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
 
     var sendRequested: (() -> Void)?
     var cancelRequested: (() -> Void)?
     var togglePauseRequested: (() -> Void)?
 
     init() {
-        window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 360, height: 122),
-            styleMask: [.titled, .fullSizeContentView],
+        window = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 172, height: 54),
+            styleMask: [.titled, .nonactivatingPanel],
             backing: .buffered,
             defer: false
         )
@@ -362,33 +492,38 @@ private final class OverlayWindowController {
         window.level = .floating
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 172, height: 54)
+        window.maxSize = NSSize(width: 172, height: 54)
 
+        let contentView = NSView()
         let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.spacing = 14
-        stack.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
+        stack.orientation = .horizontal
+        stack.alignment = .centerY
+        stack.spacing = 8
+        stack.translatesAutoresizingMaskIntoConstraints = false
 
-        label.font = .systemFont(ofSize: 15, weight: .medium)
-        label.alignment = .center
+        spinner.style = .spinning
+        spinner.controlSize = .small
+        spinner.isDisplayedWhenStopped = true
+        spinner.startAnimation(nil)
 
-        let buttons = NSStackView()
-        buttons.orientation = .horizontal
-        buttons.distribution = .fillEqually
-        buttons.spacing = 10
+        label.font = .systemFont(ofSize: 13, weight: .medium)
+        label.alignment = .left
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.required, for: .vertical)
 
-        actionButton.target = self
-        actionButton.action = #selector(send)
-        actionButton.keyEquivalent = "\r"
-
-        cancelButton.target = self
-        cancelButton.action = #selector(cancel)
-        cancelButton.keyEquivalent = "\u{1b}"
-
-        buttons.addArrangedSubview(actionButton)
-        buttons.addArrangedSubview(cancelButton)
+        stack.addArrangedSubview(spinner)
         stack.addArrangedSubview(label)
-        stack.addArrangedSubview(buttons)
-        window.contentView = stack
+        contentView.addSubview(stack)
+        window.contentView = contentView
+
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 12),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -12),
+            stack.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+            spinner.widthAnchor.constraint(equalToConstant: 18),
+            spinner.heightAnchor.constraint(equalToConstant: 18)
+        ])
     }
 
     func show(state: RecordingState, duration: TimeInterval) {
@@ -397,8 +532,7 @@ private final class OverlayWindowController {
             let frame = screen.visibleFrame
             window.setFrameOrigin(NSPoint(x: frame.midX - window.frame.width / 2, y: frame.maxY - window.frame.height - 32))
         }
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        window.orderFrontRegardless()
     }
 
     func update(state: RecordingState, duration: TimeInterval) {
@@ -406,28 +540,28 @@ private final class OverlayWindowController {
         switch state {
         case .idle:
             label.stringValue = "Ready"
+            spinner.stopAnimation(nil)
         case .recording:
-            label.stringValue = "Recording \(seconds)s"
+            label.stringValue = "\(seconds)s"
+            spinner.startAnimation(nil)
         case .paused:
             label.stringValue = "Paused \(seconds)s"
+            spinner.stopAnimation(nil)
         }
     }
 
     func setBusy(_ text: String) {
         label.stringValue = text
-        actionButton.isEnabled = false
-        cancelButton.isEnabled = false
+        spinner.startAnimation(nil)
     }
 
     func setError(_ text: String) {
         label.stringValue = text
-        actionButton.isEnabled = true
-        cancelButton.isEnabled = true
+        spinner.stopAnimation(nil)
     }
 
     func hide() {
-        actionButton.isEnabled = true
-        cancelButton.isEnabled = true
+        spinner.stopAnimation(nil)
         window.orderOut(nil)
     }
 
@@ -442,7 +576,7 @@ private final class OverlayWindowController {
 
 @MainActor
 private final class AppDelegate: NSObject, NSApplicationDelegate {
-    private let keychain = KeychainStore()
+    private let settingsStore = SettingsStore()
     private let historyStore = HistoryStore()
     private let recorder = AudioRecorder()
     private let openAI = OpenAIClient()
@@ -452,13 +586,15 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private var isSending = false
     private var apiKey = ""
-    private weak var targetApp: NSRunningApplication?
+    private var targetApp: NSRunningApplication?
+    private var targetElement: AccessibilityTarget?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        apiKey = keychain.loadApiKey()
+        apiKey = settingsStore.loadApiKey()
         configureMenu()
         configureOverlay()
         requestMicrophonePermission()
+        AccessibilityTarget.promptForPermissionIfNeeded()
         registerShortcut()
         ensureApiKey()
 
@@ -475,12 +611,18 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.title = "Dictator"
 
         let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Start Dictation", action: #selector(startDictation), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "OpenAI API Key...", action: #selector(editApiKey), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Show History", action: #selector(showHistory), keyEquivalent: ""))
+        menu.addItem(menuItem(title: "Start Dictation", action: #selector(startDictation)))
+        menu.addItem(menuItem(title: "OpenAI API Key...", action: #selector(editApiKey)))
+        menu.addItem(menuItem(title: "Show History", action: #selector(showHistory)))
         menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
+        menu.addItem(menuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
         statusItem.menu = menu
+    }
+
+    private func menuItem(title: String, action: Selector, keyEquivalent: String = "") -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: keyEquivalent)
+        item.target = self
+        return item
     }
 
     private func configureOverlay() {
@@ -504,40 +646,60 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func registerShortcut() {
         shortcut = GlobalShortcut { [weak self] in
-            Task { @MainActor in self?.startDictation() }
+            Task { @MainActor in await self?.toggleDictationFromShortcut() }
         }
         shortcut?.register()
     }
 
-    private func ensureApiKey() {
+    private func toggleDictationFromShortcut() async {
+        if recorder.state == .idle {
+            startDictation()
+        } else {
+            await sendRecording()
+        }
+    }
+
+    @discardableResult
+    private func ensureApiKey() -> Bool {
         if apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             editApiKey()
         }
+
+        return !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     @objc private func editApiKey() {
         let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
         input.stringValue = apiKey
 
-        let alert = NSAlert()
-        alert.messageText = "Enter OpenAI API key"
-        alert.informativeText = "This is stored in your macOS Keychain and is only required once."
-        alert.accessoryView = input
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
+        let keyAlert = NSAlert()
+        keyAlert.messageText = "Enter OpenAI API key"
+        keyAlert.informativeText = "This is stored in ~/Library/Application Support/Dictator/openai-api-key.txt."
+        keyAlert.accessoryView = input
+        keyAlert.addButton(withTitle: "Save")
+        keyAlert.addButton(withTitle: "Cancel")
+        keyAlert.window.initialFirstResponder = input
 
-        if alert.runModal() == .alertFirstButtonReturn {
-            apiKey = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-            keychain.saveApiKey(apiKey)
+        if keyAlert.runModal() == .alertFirstButtonReturn {
+            let newApiKey = input.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            do {
+                try settingsStore.saveApiKey(newApiKey)
+                apiKey = newApiKey
+            } catch {
+                alert(title: "API key not saved", message: error.localizedDescription)
+            }
         }
     }
 
     @objc private func startDictation() {
         guard !isSending, recorder.state == .idle else { return }
-        ensureApiKey()
-        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        guard ensureApiKey() else { return }
 
-        targetApp = NSWorkspace.shared.frontmostApplication
+        if let frontmostApp = NSWorkspace.shared.frontmostApplication,
+           frontmostApp.bundleIdentifier != Bundle.main.bundleIdentifier {
+            targetApp = frontmostApp
+        }
+        targetElement = AccessibilityTarget.captureFocusedElement()
 
         do {
             try recorder.start()
@@ -578,6 +740,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             historyStore.add(finalText)
             overlay.hide()
             pasteIntoTarget(finalText)
+        } catch let error as OpenAIError where error.isAuthenticationFailure {
+            overlay.hide()
+            alert(title: "OpenAI API key required", message: "Enter or update your OpenAI API key to continue.")
+            editApiKey()
         } catch {
             overlay.setError(error.localizedDescription)
             alert(title: "Dictation failed", message: error.localizedDescription)
@@ -588,18 +754,53 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func pasteIntoTarget(_ text: String) {
         NSPasteboard.general.clearContents()
+        NSPasteboard.general.declareTypes([.string], owner: nil)
         NSPasteboard.general.setString(text, forType: .string)
 
-        targetApp?.activate(options: [.activateIgnoringOtherApps])
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            let source = CGEventSource(stateID: .hidSystemState)
-            let down = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true)
-            let up = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false)
-            down?.flags = .maskCommand
-            up?.flags = .maskCommand
-            down?.post(tap: .cghidEventTap)
-            up?.post(tap: .cghidEventTap)
+        guard let targetApp else {
+            alert(title: "Transcript copied", message: "Dictator could not identify the previous app. The transcript is on the clipboard.")
+            return
         }
+
+        targetApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        let targetElement = targetElement
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
+            if targetElement?.insertText(text) == true {
+                return
+            }
+
+            targetElement?.focus()
+            Self.sendPasteShortcut(to: targetApp.processIdentifier)
+        }
+    }
+
+    private static func sendPasteShortcut(to processIdentifier: pid_t) {
+        let source = CGEventSource(stateID: .hidSystemState)
+        let commandDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_Command), keyDown: true)
+        let vDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true)
+        let vUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: false)
+        let commandUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_Command), keyDown: false)
+
+        commandDown?.flags = .maskCommand
+        vDown?.flags = .maskCommand
+        vUp?.flags = .maskCommand
+
+        postKeyEvent(commandDown, to: processIdentifier)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+            postKeyEvent(vDown, to: processIdentifier)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+                postKeyEvent(vUp, to: processIdentifier)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
+                    postKeyEvent(commandUp, to: processIdentifier)
+                }
+            }
+        }
+    }
+
+    private static func postKeyEvent(_ event: CGEvent?, to processIdentifier: pid_t) {
+        guard let event else { return }
+        event.postToPid(processIdentifier)
+        event.post(tap: .cgSessionEventTap)
     }
 
     @objc private func showHistory() {
