@@ -340,76 +340,7 @@ private final class AccessibilityTarget {
 
     func insertText(_ text: String) -> Bool {
         focus()
-
-        if insertIntoValue(text) {
-            return true
-        }
-
-        if AXUIElementSetAttributeValue(
-            element,
-            kAXSelectedTextAttribute as CFString,
-            text as CFTypeRef
-        ) == .success {
-            return true
-        }
-
         return false
-    }
-
-    private func insertIntoValue(_ text: String) -> Bool {
-        var valueRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element,
-            kAXValueAttribute as CFString,
-            &valueRef
-        ) == .success,
-              let currentValue = valueRef as? String else {
-            return false
-        }
-
-        var rangeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element,
-            kAXSelectedTextRangeAttribute as CFString,
-            &rangeRef
-        ) == .success,
-              let rangeRef else {
-            return false
-        }
-
-        let axRange = rangeRef as! AXValue
-        var selectedRange = CFRange()
-        guard AXValueGetValue(axRange, .cfRange, &selectedRange),
-              selectedRange.location >= 0,
-              selectedRange.length >= 0 else {
-            return false
-        }
-
-        let nsValue = currentValue as NSString
-        guard selectedRange.location <= nsValue.length,
-              selectedRange.location + selectedRange.length <= nsValue.length else {
-            return false
-        }
-
-        let updatedValue = nsValue.replacingCharacters(in: NSRange(location: selectedRange.location, length: selectedRange.length), with: text)
-        guard AXUIElementSetAttributeValue(
-            element,
-            kAXValueAttribute as CFString,
-            updatedValue as CFTypeRef
-        ) == .success else {
-            return false
-        }
-
-        var insertionRange = CFRange(location: selectedRange.location + (text as NSString).length, length: 0)
-        if let insertionValue = AXValueCreate(.cfRange, &insertionRange) {
-            _ = AXUIElementSetAttributeValue(
-                element,
-                kAXSelectedTextRangeAttribute as CFString,
-                insertionValue
-            )
-        }
-
-        return true
     }
 
     func focus() {
@@ -765,12 +696,10 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         targetApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         let targetElement = targetElement
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
-            if targetElement?.insertText(text) == true {
-                return
+            _ = targetElement?.insertText(text)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                Self.sendPasteShortcut(to: targetApp.processIdentifier)
             }
-
-            targetElement?.focus()
-            Self.sendPasteShortcut(to: targetApp.processIdentifier)
         }
     }
 
@@ -800,7 +729,6 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private static func postKeyEvent(_ event: CGEvent?, to processIdentifier: pid_t) {
         guard let event else { return }
         event.postToPid(processIdentifier)
-        event.post(tap: .cgSessionEventTap)
     }
 
     @objc private func showHistory() {
