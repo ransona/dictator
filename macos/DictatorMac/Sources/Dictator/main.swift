@@ -773,6 +773,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         guard !isSending, recorder.state == .idle else { return }
         guard ensureApiKey() else { return }
 
+        targetApp = nil
+        targetElement = nil
         if let frontmostApp = NSWorkspace.shared.frontmostApplication,
            frontmostApp.bundleIdentifier != Bundle.main.bundleIdentifier {
             targetApp = frontmostApp
@@ -790,6 +792,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private func cancelRecording() async {
         _ = recorder.stop(cancel: true)
         overlay.hide()
+        restoreTargetFocus()
     }
 
     private func sendRecording() async {
@@ -847,6 +850,16 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                 Self.sendPasteShortcut(to: targetApp.processIdentifier)
             }
+        }
+    }
+
+    private func restoreTargetFocus() {
+        guard let targetApp else { return }
+
+        let targetElement = targetElement
+        targetApp.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
+            targetElement?.focus()
         }
     }
 
