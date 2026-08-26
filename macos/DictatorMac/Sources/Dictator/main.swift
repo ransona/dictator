@@ -19,11 +19,13 @@ private struct HistoryMessage: Codable {
 private final class SettingsStore {
     private let directoryURL: URL
     private let apiKeyURL: URL
+    private let transcriptionLanguageURL: URL
 
     init() {
         directoryURL = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Dictator", isDirectory: true)
         apiKeyURL = directoryURL.appendingPathComponent("openai-api-key.txt")
+        transcriptionLanguageURL = directoryURL.appendingPathComponent("transcription-language.txt")
     }
 
     func loadApiKey() -> String {
@@ -37,6 +39,20 @@ private final class SettingsStore {
     func saveApiKey(_ apiKey: String) throws {
         try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
         try apiKey.write(to: apiKeyURL, atomically: true, encoding: .utf8)
+    }
+
+    func loadTranscriptionLanguage() -> String {
+        guard let value = try? String(contentsOf: transcriptionLanguageURL, encoding: .utf8) else {
+            return "en"
+        }
+
+        let code = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return code.isEmpty ? "en" : code
+    }
+
+    func saveTranscriptionLanguage(_ languageCode: String) throws {
+        try FileManager.default.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+        try languageCode.write(to: transcriptionLanguageURL, atomically: true, encoding: .utf8)
     }
 }
 
@@ -189,7 +205,7 @@ private final class OpenAIClient: @unchecked Sendable {
     private let transcriptionModel = "whisper-1"
     private let rewriteModel = "gpt-4o-mini"
 
-    func transcribe(audioURL: URL, apiKey: String) async throws -> String {
+    func transcribe(audioURL: URL, apiKey: String, languageCode: String) async throws -> String {
         var request = URLRequest(url: URL(string: "https://api.openai.com/v1/audio/transcriptions")!)
         request.httpMethod = "POST"
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
@@ -200,6 +216,7 @@ private final class OpenAIClient: @unchecked Sendable {
         var body = Data()
         appendField(name: "model", value: transcriptionModel, boundary: boundary, to: &body)
         appendField(name: "response_format", value: "text", boundary: boundary, to: &body)
+        appendField(name: "language", value: languageCode, boundary: boundary, to: &body)
         appendFile(name: "file", filename: "dictation.m4a", contentType: "audio/m4a", url: audioURL, boundary: boundary, to: &body)
         body.appendString("--\(boundary)--\r\n")
         request.httpBody = body
@@ -403,6 +420,49 @@ private final class GlobalShortcut {
 }
 
 @MainActor
+private final class RecordingKeyMonitor {
+    private var globalMonitor: Any?
+    private var localMonitor: Any?
+    private let isActive: () -> Bool
+    private let send: () -> Void
+    private let cancel: () -> Void
+
+    init(isActive: @escaping () -> Bool, send: @escaping () -> Void, cancel: @escaping () -> Void) {
+        self.isActive = isActive
+        self.send = send
+        self.cancel = cancel
+    }
+
+    func register() {
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            Task { @MainActor in
+                _ = self?.handle(event)
+            }
+        }
+
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            guard let self else { return event }
+            return self.handle(event) ? nil : event
+        }
+    }
+
+    private func handle(_ event: NSEvent) -> Bool {
+        guard isActive() else { return false }
+
+        switch Int(event.keyCode) {
+        case kVK_Escape:
+            cancel()
+            return true
+        case kVK_Return, kVK_ANSI_KeypadEnter:
+            send()
+            return true
+        default:
+            return false
+        }
+    }
+}
+
+@MainActor
 private final class OverlayWindowController {
     private let window: NSWindow
     private let spinner = NSProgressIndicator()
@@ -517,16 +577,20 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timer: Timer?
     private var isSending = false
     private var apiKey = ""
+    private var transcriptionLanguage = "en"
     private var targetApp: NSRunningApplication?
     private var targetElement: AccessibilityTarget?
+    private var recordingKeyMonitor: RecordingKeyMonitor?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         apiKey = settingsStore.loadApiKey()
+        transcriptionLanguage = settingsStore.loadTranscriptionLanguage()
         configureMenu()
         configureOverlay()
         requestMicrophonePermission()
         AccessibilityTarget.promptForPermissionIfNeeded()
         registerShortcut()
+        registerRecordingKeyMonitor()
         ensureApiKey()
 
         timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
@@ -544,6 +608,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         menu.addItem(menuItem(title: "Start Dictation", action: #selector(startDictation)))
         menu.addItem(menuItem(title: "OpenAI API Key...", action: #selector(editApiKey)))
+        menu.addItem(menuItem(title: "Transcription Language...", action: #selector(editTranscriptionLanguage)))
         menu.addItem(menuItem(title: "Show History", action: #selector(showHistory)))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(menuItem(title: "Quit", action: #selector(quit), keyEquivalent: "q"))
@@ -580,6 +645,22 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in await self?.toggleDictationFromShortcut() }
         }
         shortcut?.register()
+    }
+
+    private func registerRecordingKeyMonitor() {
+        recordingKeyMonitor = RecordingKeyMonitor(
+            isActive: { [weak self] in
+                guard let self else { return false }
+                return self.recorder.state != .idle && !self.isSending
+            },
+            send: { [weak self] in
+                Task { @MainActor in await self?.sendRecording() }
+            },
+            cancel: { [weak self] in
+                Task { @MainActor in await self?.cancelRecording() }
+            }
+        )
+        recordingKeyMonitor?.register()
     }
 
     private func toggleDictationFromShortcut() async {
@@ -622,6 +703,72 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    @objc private func editTranscriptionLanguage() {
+        let languageOptions = [
+            ("English", "en"),
+            ("Spanish", "es"),
+            ("French", "fr"),
+            ("German", "de"),
+            ("Italian", "it"),
+            ("Portuguese", "pt"),
+            ("Dutch", "nl"),
+            ("Welsh", "cy")
+        ]
+
+        let popUp = NSPopUpButton(frame: NSRect(x: 0, y: 28, width: 360, height: 26), pullsDown: false)
+        for option in languageOptions {
+            popUp.addItem(withTitle: "\(option.0) (\(option.1))")
+            popUp.lastItem?.representedObject = option.1
+        }
+
+        let customField = NSTextField(frame: NSRect(x: 0, y: 0, width: 360, height: 24))
+        customField.placeholderString = "ISO language code, e.g. en"
+        customField.stringValue = transcriptionLanguage
+
+        if let index = languageOptions.firstIndex(where: { $0.1 == transcriptionLanguage }) {
+            popUp.selectItem(at: index)
+        }
+
+        popUp.target = self
+        popUp.action = #selector(languagePopUpChanged(_:))
+
+        let accessoryView = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: 58))
+        accessoryView.addSubview(popUp)
+        accessoryView.addSubview(customField)
+
+        let languageAlert = NSAlert()
+        languageAlert.messageText = "Transcription language"
+        languageAlert.informativeText = "Dictator passes this language code to OpenAI transcription instead of allowing auto-detection."
+        languageAlert.accessoryView = accessoryView
+        languageAlert.addButton(withTitle: "Save")
+        languageAlert.addButton(withTitle: "Cancel")
+        languageAlert.window.initialFirstResponder = customField
+
+        if languageAlert.runModal() == .alertFirstButtonReturn {
+            let code = customField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !code.isEmpty else {
+                alert(title: "Language not saved", message: "Enter a language code such as en, es, fr, or de.")
+                return
+            }
+
+            do {
+                try settingsStore.saveTranscriptionLanguage(code)
+                transcriptionLanguage = code
+            } catch {
+                alert(title: "Language not saved", message: error.localizedDescription)
+            }
+        }
+    }
+
+    @objc private func languagePopUpChanged(_ sender: NSPopUpButton) {
+        guard let code = sender.selectedItem?.representedObject as? String,
+              let customField = sender.superview?.subviews.compactMap({ $0 as? NSTextField }).first else {
+            return
+        }
+
+        customField.stringValue = code
+    }
+
     @objc private func startDictation() {
         guard !isSending, recorder.state == .idle else { return }
         guard ensureApiKey() else { return }
@@ -657,7 +804,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         do {
-            let transcript = try await openAI.transcribe(audioURL: audioURL, apiKey: apiKey)
+            let transcript = try await openAI.transcribe(audioURL: audioURL, apiKey: apiKey, languageCode: transcriptionLanguage)
             try? FileManager.default.removeItem(at: audioURL)
             guard !transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                 overlay.hide()

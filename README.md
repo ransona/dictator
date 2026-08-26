@@ -16,9 +16,11 @@ This repo now contains:
 - Optionally runs one chat-based post-processing pass over the full transcript when the dictated text includes an instruction like making an email, summarizing, formatting, or rewriting.
 - Uses the final returned text to paste back into the text field that was focused before recording started.
 - Stores the OpenAI API key for later launches.
+- Stores a transcription language so OpenAI does not auto-detect the spoken language.
 - Can auto-start at sign-in.
 
 On macOS, the API key is requested once on first launch and stored in `~/Library/Application Support/Dictator/openai-api-key.txt`.
+The transcription language defaults to English (`en`) and is stored in `~/Library/Application Support/Dictator/transcription-language.txt`.
 
 ## Controls
 
@@ -38,6 +40,7 @@ On macOS, the API key is requested once on first launch and stored in `~/Library
 ## OpenAI API notes
 
 This prototype uses the OpenAI audio transcription endpoint with `model=whisper-1` and `response_format=text`.
+On macOS, Dictator also sends the saved `language` parameter. The default is `en`; change it from the menu-bar item with `Dictator` -> `Transcription Language...`.
 
 Official references:
 
@@ -94,7 +97,7 @@ To also launch at sign-in:
 ./scripts/Install-Mac.sh --start-on-login
 ```
 
-The installer copies the app to `/Applications/Dictator.app`. On first launch, Dictator prompts once for the OpenAI API key and stores it in `~/Library/Application Support/Dictator/openai-api-key.txt`. macOS will also ask for microphone permission. If the double-press `Ctrl` shortcut or automatic paste is blocked, grant Accessibility permission to Dictator in System Settings.
+The installer copies the app to `/Applications/Dictator.app`. On first launch, Dictator prompts once for the OpenAI API key and stores it in `~/Library/Application Support/Dictator/openai-api-key.txt`. The transcription language defaults to English and can be changed from `Dictator` -> `Transcription Language...`. macOS will also ask for microphone permission. If the double-press `Ctrl` shortcut or automatic paste is blocked, grant Accessibility permission to Dictator in System Settings.
 
 ### macOS reinstall permission note
 
