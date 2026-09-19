@@ -13,7 +13,7 @@ This repo now contains:
 - Pops a small always-on-top recording window.
 - Records microphone audio locally.
 - Sends the captured `.wav` audio to `POST /v1/audio/transcriptions`.
-- Optionally runs one chat-based post-processing pass over the full transcript when the dictated text includes an instruction like making an email, summarizing, formatting, or rewriting.
+- Uses the Whisper transcription result verbatim without a second rewriting or formatting pass.
 - Uses the final returned text to paste back into the text field that was focused before recording started.
 - Stores the OpenAI API key for later launches.
 - Stores a transcription language so OpenAI does not auto-detect the spoken language.
