@@ -33,7 +33,8 @@ The transcription language defaults to English (`en`) and is stored in `~/Librar
 
 ### macOS
 
-- Double-press `Ctrl`: start dictation; double-press `Ctrl` again to stop, transcribe, and paste
+- Triple-press `Ctrl`: start dictation; triple-press `Ctrl` again to stop, transcribe, and paste
+- Triple-press `Shift` while recording: stop, transcribe, paste, and press `Enter`
 - `Enter`: stop recording, transcribe, and paste
 - `Escape`: cancel recording
 
@@ -97,7 +98,7 @@ To also launch at sign-in:
 ./scripts/Install-Mac.sh --start-on-login
 ```
 
-The installer copies the app to `/Applications/Dictator.app`. On first launch, Dictator prompts once for the OpenAI API key and stores it in `~/Library/Application Support/Dictator/openai-api-key.txt`. The transcription language defaults to English and can be changed from `Dictator` -> `Transcription Language...`. macOS will also ask for microphone permission. If the double-press `Ctrl` shortcut or automatic paste is blocked, grant Accessibility permission to Dictator in System Settings.
+The installer copies the app to `/Applications/Dictator.app`. On first launch, Dictator prompts once for the OpenAI API key and stores it in `~/Library/Application Support/Dictator/openai-api-key.txt`. The transcription language defaults to English and can be changed from `Dictator` -> `Transcription Language...`. macOS will also ask for microphone permission. If the triple-press `Ctrl`/`Shift` shortcut or automatic paste is blocked, grant Accessibility permission to Dictator in System Settings.
 
 ### macOS reinstall permission note
 
@@ -126,6 +127,6 @@ artifacts/pkg/Dictator-macOS.pkg
 - Paste-back relies on restoring the previously focused window and sending `Ctrl+V`, so some elevated or protected windows may block it.
 - `Win+Esc` can fail to register if another app already owns the hotkey.
 - The prototype uses the clipboard to paste the transcript, which temporarily replaces the current clipboard contents.
-- On macOS, double-press `Ctrl` is detected with a keyboard event monitor and may require Accessibility permission. On a Windows keyboard connected to a Mac, the Windows keyboard `Ctrl` key maps to macOS Control. Use the same shortcut again to stop recording without clicking the overlay.
+- On macOS, triple-press `Ctrl` and triple-press `Shift` are detected with a keyboard event monitor and may require Accessibility permission. On a Windows keyboard connected to a Mac, the Windows keyboard `Ctrl` key maps to macOS Control. Use triple-press `Ctrl` to paste without submitting, or triple-press `Shift` to paste and press Enter.
 - On macOS, paste-back sends `Command+V` and may require Accessibility permission.
 - The macOS package is ad-hoc signed for local installation, not notarized for public distribution.

@@ -297,15 +297,19 @@ private final class AccessibilityTarget {
 
 @MainActor
 private final class GlobalShortcut {
-    private static let doubleTapInterval: TimeInterval = 0.45
+    private static let tripleTapInterval: TimeInterval = 0.45
 
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var controlWasDown = false
+    private var controlTapCount = 0
     private var lastControlTap = Date.distantPast
-    private let callback: () -> Void
+    private var shiftWasDown = false
+    private var shiftTapCount = 0
+    private var lastShiftTap = Date.distantPast
+    private let callback: (Bool) -> Void
 
-    init(callback: @escaping () -> Void) {
+    init(callback: @escaping (Bool) -> Void) {
         self.callback = callback
     }
 
@@ -333,15 +337,40 @@ private final class GlobalShortcut {
 
         if controlIsDown && !controlWasDown {
             let now = Date()
-            if now.timeIntervalSince(lastControlTap) <= Self.doubleTapInterval {
-                lastControlTap = .distantPast
-                callback()
+            if now.timeIntervalSince(lastControlTap) <= Self.tripleTapInterval {
+                controlTapCount += 1
             } else {
-                lastControlTap = now
+                controlTapCount = 1
+            }
+            lastControlTap = now
+
+            if controlTapCount == 3 {
+                controlTapCount = 0
+                callback(false)
+            }
+        }
+
+        let shiftIsDown = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .contains(.shift)
+
+        if shiftIsDown && !shiftWasDown {
+            let now = Date()
+            if now.timeIntervalSince(lastShiftTap) <= Self.tripleTapInterval {
+                shiftTapCount += 1
+            } else {
+                shiftTapCount = 1
+            }
+            lastShiftTap = now
+
+            if shiftTapCount == 3 {
+                shiftTapCount = 0
+                callback(true)
             }
         }
 
         controlWasDown = controlIsDown
+        shiftWasDown = shiftIsDown
     }
 }
 
@@ -549,7 +578,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func configureOverlay() {
         overlay.sendRequested = { [weak self] in
-            Task { @MainActor in await self?.sendRecording() }
+            Task { @MainActor in await self?.sendRecording(insertNewline: false) }
         }
         overlay.cancelRequested = { [weak self] in
             Task { @MainActor in await self?.cancelRecording() }
@@ -567,8 +596,8 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func registerShortcut() {
-        shortcut = GlobalShortcut { [weak self] in
-            Task { @MainActor in await self?.toggleDictationFromShortcut() }
+        shortcut = GlobalShortcut { [weak self] insertNewline in
+            Task { @MainActor in await self?.toggleDictationFromShortcut(insertNewline: insertNewline) }
         }
         shortcut?.register()
     }
@@ -580,7 +609,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
                 return self.recorder.state != .idle && !self.isSending
             },
             send: { [weak self] in
-                Task { @MainActor in await self?.sendRecording() }
+                Task { @MainActor in await self?.sendRecording(insertNewline: false) }
             },
             cancel: { [weak self] in
                 Task { @MainActor in await self?.cancelRecording() }
@@ -589,11 +618,11 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         recordingKeyMonitor?.register()
     }
 
-    private func toggleDictationFromShortcut() async {
+    private func toggleDictationFromShortcut(insertNewline: Bool) async {
         if recorder.state == .idle {
             startDictation()
         } else {
-            await sendRecording()
+            await sendRecording(insertNewline: insertNewline)
         }
     }
 
@@ -721,7 +750,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         restoreTargetFocus()
     }
 
-    private func sendRecording() async {
+    private func sendRecording(insertNewline: Bool) async {
         guard recorder.state != .idle, !isSending else { return }
         isSending = true
         overlay.setBusy("Transcribing...")
@@ -744,7 +773,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
 
             historyStore.add(transcript)
             overlay.hide()
-            pasteIntoTarget(transcript)
+            pasteIntoTarget(transcript, insertNewline: insertNewline)
         } catch let error as OpenAIError where error.isAuthenticationFailure {
             overlay.hide()
             alert(title: "OpenAI API key required", message: "Enter or update your OpenAI API key to continue.")
@@ -757,7 +786,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         isSending = false
     }
 
-    private func pasteIntoTarget(_ text: String) {
+    private func pasteIntoTarget(_ text: String, insertNewline: Bool) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.declareTypes([.string], owner: nil)
         NSPasteboard.general.setString(text, forType: .string)
@@ -772,7 +801,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.65) {
             _ = targetElement?.insertText(text)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
-                Self.sendPasteShortcut(to: targetApp.processIdentifier)
+                Self.sendPasteShortcut(to: targetApp.processIdentifier, insertNewline: insertNewline)
             }
         }
     }
@@ -787,7 +816,7 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    private static func sendPasteShortcut(to processIdentifier: pid_t) {
+    private static func sendPasteShortcut(to processIdentifier: pid_t, insertNewline: Bool) {
         let source = CGEventSource(stateID: .hidSystemState)
         let commandDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_Command), keyDown: true)
         let vDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_ANSI_V), keyDown: true)
@@ -804,7 +833,13 @@ private final class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
                 postKeyEvent(vUp, to: processIdentifier)
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.04) {
-                    postKeyEvent(commandUp, to: processIdentifier)
+                postKeyEvent(commandUp, to: processIdentifier)
+                if insertNewline {
+                    let enterDown = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_Return), keyDown: true)
+                    let enterUp = CGEvent(keyboardEventSource: source, virtualKey: CGKeyCode(kVK_Return), keyDown: false)
+                    postKeyEvent(enterDown, to: processIdentifier)
+                    postKeyEvent(enterUp, to: processIdentifier)
+                }
                 }
             }
         }

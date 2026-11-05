@@ -26,5 +26,5 @@ if [[ "$START_ON_LOGIN" == "--start-on-login" ]]; then
 fi
 
 echo "Installed $INSTALL_DIR"
-echo "Shortcut: double-press Ctrl to start; double-press Ctrl again or press Enter to stop and paste; press Escape to cancel"
+echo "Shortcut: triple-press Ctrl to start/stop and paste; triple-press Shift while recording to paste and press Enter; press Escape to cancel"
 echo "On first launch, macOS will ask for microphone permission. The shortcut and paste automation may require Accessibility permission in System Settings."
